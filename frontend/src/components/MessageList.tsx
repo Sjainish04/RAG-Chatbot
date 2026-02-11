@@ -16,6 +16,7 @@
 import { useEffect, useRef } from 'react';
 import type { Message } from '../types';
 import { SourceTag } from './SourceTag';
+import { formatMessage } from '../utils/format';
 
 interface MessageListProps {
   messages: Message[];
@@ -77,8 +78,10 @@ export function MessageList({ messages }: MessageListProps) {
                       : 'bg-white border border-gray-100 text-gray-800 rounded-tl-none'
                   }`}
                 >
-                  <div className="whitespace-pre-wrap break-words text-[15px] leading-relaxed">
-                    {message.content || (
+                  <div className="text-[15px] leading-relaxed">
+                    {message.content ? (
+                      formatMessage(message.content)
+                    ) : (
                       <div className="flex gap-1 py-1">
                         <span className="w-1.5 h-1.5 bg-gray-300 rounded-full animate-bounce"></span>
                         <span className="w-1.5 h-1.5 bg-gray-300 rounded-full animate-bounce delay-75"></span>

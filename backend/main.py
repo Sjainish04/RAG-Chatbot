@@ -1,6 +1,6 @@
 """
 Simple RAG Backend with FastAPI.
-Provides document ingestion and question-answering with semantic search.
+Provides document ingestion and question-answering with semantic search and conversation memory.
 """
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, UploadFile, File, Form
@@ -97,6 +97,7 @@ class IngestRequest(BaseModel):
 
 class AskRequest(BaseModel):
     question: str
+    history: list[dict] = [] # List of {"role": "user/assistant", "content": "..."}
 
 
 # --- API Endpoints ---
@@ -187,8 +188,7 @@ async def ingest_file(
 @app.post("/ask")
 async def ask_question(request: AskRequest, db: AsyncSession = Depends(get_db)):
     """
-    Ask a question using RAG.
-    Finds relevant documents and generates a streaming answer.
+    Ask a question using RAG with conversation memory and precise citations.
     """
     try:
         print(f"❓ Question: {request.question}")
@@ -196,8 +196,8 @@ async def ask_question(request: AskRequest, db: AsyncSession = Depends(get_db)):
         # Get query embedding
         question_vector = await ai_service.get_query_embedding(request.question)
 
-        # Find top 5 most relevant documents with a similarity threshold
-        threshold = 0.6
+        # Find top 5 most relevant documents with a tighter similarity threshold
+        threshold = 0.5
         stmt = select(Document).where(
             Document.embedding.cosine_distance(question_vector) < threshold
         ).order_by(
@@ -207,7 +207,7 @@ async def ask_question(request: AskRequest, db: AsyncSession = Depends(get_db)):
         result = await db.execute(stmt)
         related_docs = result.scalars().all()
 
-        # Build context from relevant documents
+        # Build context with clear source mapping
         context_text = ""
         source_map = {}
         if related_docs:
@@ -223,14 +223,21 @@ async def ask_question(request: AskRequest, db: AsyncSession = Depends(get_db)):
             
             context_blocks = []
             for doc in related_docs:
-                source_num = source_map[doc.source]
-                context_blocks.append(f"[[SOURCE ID: {source_num}]]\n{doc.content}")
+                s_id = source_map[doc.source]
+                # Extremely explicit labeling to prevent source confusion
+                context_blocks.append(f"--- START REFERENCE [{s_id}] (FILE: {doc.source}) ---\n{doc.content}\n--- END REFERENCE [{s_id}] ---")
             context_text = "\n\n---\n\n".join(context_blocks)
+
+        # Format conversation history for the prompt
+        history_text = ""
+        if request.history:
+            for msg in request.history[-6:]: # Keep last 6 messages
+                role = "User" if msg["role"] == "user" else "Assistant"
+                history_text += f"{role}: {msg['content']}\n"
 
         # Generate streaming response
         async def generate_answer():
             # Send source mapping first
-            # We transform {Name: 1} to ["Name"] where index 0 is [1]
             sources = list(source_map.keys())
             yield f"data: {json.dumps({'sources': sources})}\n\n"
 
@@ -238,26 +245,25 @@ async def ask_question(request: AskRequest, db: AsyncSession = Depends(get_db)):
             source_list_str = "\n".join([f"[{i}]: {name}" for name, i in source_map.items()])
             
             prompt = f"""
-You are a helpful and versatile AI assistant. 
+You are a precision-oriented AI assistant with access to a Knowledge Base and Conversation History.
 
-Below is some context retrieved from a knowledge base (if any was found). 
+CONVERSATION HISTORY:
+{history_text if history_text else "No previous history."}
 
-INSTRUCTIONS:
-1. ALWAYS ANSWER: Provide a helpful and accurate answer to the user's question.
-2. STRUCTURE: 
-   - Use clear, distinct paragraphs for different points.
-   - Use bullet points or numbered lists if you are listing multiple items.
-   - Use **bold text** for important terms, names, or key takeaways.
-3. USE KNOWLEDGE BASE: If the provided CONTEXT contains relevant information, use it and cite the source using [1], [2], etc.
-4. GENERAL KNOWLEDGE: If the CONTEXT is not relevant or is empty, use your own internal knowledge to answer the question. 
-5. BE DIRECT: If answering from general knowledge, don't mention that you are doing so unless asked. Just provide the answer.
-6. TONESTYLE: Maintain a friendly, professional, and well-structured tone.
+KNOWLEDGE BASE CONTEXT (Use these for specific facts):
+{context_text if context_text else "No relevant context found."}
 
-SOURCE MAPPING:
-{source_list_str if source_map else "No relevant context found in knowledge base."}
+SOURCE KEY (Reference IDs for citations):
+{source_list_str if source_map else "None."}
 
-CONTEXT:
-{context_text if context_text else "No relevant context found in knowledge base."}
+CRITICAL INSTRUCTIONS:
+1. CITATION ACCURACY: 
+   - Every fact you take from the Context MUST be cited immediately with its REFERENCE ID, e.g., "The release is in October [1]."
+   - Verify the SOURCE FILE and REFERENCE ID carefully. DO NOT attribute everything to [1] if it came from a different reference block.
+   - If a fact is not in the context, do NOT use a citation number.
+2. CONVERSATION CONTEXT: Use the Conversation History to understand pronouns like "that," "it," or "the previous document."
+3. BE HELPFUL: Always answer the question. If context is missing, use your general knowledge (without citations).
+4. STRUCTURE: Use clear paragraphs and **bold text** for key names/terms.
 
 QUESTION:
 {request.question}

@@ -71,8 +71,14 @@ export function useChat() {
     }));
 
     try {
+      // Format history for the backend
+      const history = state.messages.map(m => ({
+        role: m.role,
+        content: m.content
+      }));
+
       await askQuestion(
-        { question },
+        { question, history },
         (chunk) => {
           setState((prev) => {
             const newMessages = prev.messages.map((msg) => {
